@@ -8,35 +8,7 @@ import subprocess
 import os
 from datetime import datetime
 from urllib.parse import unquote
-
-class Worker(QThread):
-    """
-    Worker thread class for running background tasks without blocking the GUI.
-    """
-    finished = pyqtSignal(str)  # Signal to indicate task completion and provide a message
-    status = pyqtSignal(str)    # Signal to update status message in the GUI
-    
-    def __init__(self, command, output_file=None):
-        super().__init__()
-        self.command = command
-        self.output_file = output_file
-
-    def run(self):
-        """
-        Executes the command in a subprocess and emits signals for status updates and completion.
-        """
-        try:
-            self.status.emit(f"Running: {' '.join(self.command)}")
-            if self.output_file:
-                with open(self.output_file, 'w') as f:
-                    subprocess.run(self.command, stdout=f, stderr=subprocess.STDOUT, check=True)
-            else:
-                subprocess.run(self.command, check=True)
-            self.finished.emit("Task completed successfully.")
-        except subprocess.CalledProcessError as e:
-            self.finished.emit(f"Error during processing: {str(e)}")
-        except Exception as e:
-            self.finished.emit(f"Error: {str(e)}")
+from ffmpeg.asyncio import FFmpeg
 
 
 class WorshipServiceEditor(QMainWindow):
@@ -229,7 +201,7 @@ class WorshipServiceEditor(QMainWindow):
 
     def start_extract_and_transcribe(self):
         """
-        Starts the extraction and transcription process in a background thread.
+        Starts the extraction and transcription process asynchronously using python-ffmpeg.
         """
         try:
             # Get the input file path from the current media
@@ -254,65 +226,70 @@ class WorshipServiceEditor(QMainWindow):
             out_time = self.format_time_with_ms(self.out_point/1000)
             
             # Extract video segment
-            self.statusBar().showMessage(f"Preparing to extract video segment...")
-            extract_cmd = [
-                'ffmpeg', '-ss', in_time, '-to', out_time,
-                '-i', input_file, '-c', 'copy', sermon_video
-            ]
-            
-            # Convert to audio
-            audio_cmd = [
-                'ffmpeg', '-i', sermon_video,
-                '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '16000',
-                sermon_audio
-            ]
-            
-            # Transcribe
-            whisper_cmd = [
-                '/Users/ted/dev/whisper.cpp/build/bin/whisper-cli',
-                '-m', '/Users/ted/dev/whisper.cpp/models/ggml-large-v3.bin',
-                '-np', '-nt',
-                '-f', sermon_audio
-            ]
-            
-            # Create worker threads for each task
-            self.extract_worker = Worker(extract_cmd)
-            self.audio_worker = Worker(audio_cmd)
-            self.whisper_worker = Worker(whisper_cmd, sermon_text)  # Pass output file to whisper worker
-            
-            # Connect signals and slots for each worker
-            self.extract_worker.status.connect(self.update_status)
-            self.extract_worker.finished.connect(self.on_extract_finished)
-            
-            self.audio_worker.status.connect(self.update_status)
-            self.audio_worker.finished.connect(self.on_audio_finished)
-            
-            self.whisper_worker.status.connect(self.update_status)
-            self.whisper_worker.finished.connect(self.on_whisper_finished)
-            
-            # Start the extraction worker
-            self.extract_worker.start()
-            
-        except Exception as e:
-            self.statusBar().showMessage(f"Error: {str(e)}")
+            self.update_status(f"Preparing to extract video segment...")
+            extract_ffmpeg = (
+                FFmpeg()
+                .option("y")
+                .input(input_file, ss=in_time)
+                .output(sermon_video, to=out_time, codec="copy")
+            )
 
-    def on_extract_finished(self, message):
-        """Called when the extract worker finishes."""
-        self.update_status(message)
-        if "success" in message.lower():  # Check for success
-            self.audio_worker.start()  # Start the next worker
-        
-    def on_audio_finished(self, message):
-        """Called when the audio worker finishes."""
-        self.update_status(message)
-        if "success" in message.lower(): # Check for success
-            self.whisper_worker.start()  # Start the next worker
-        
-    def on_whisper_finished(self, message):
-        """Called when the whisper worker finishes."""
-        self.update_status(message)
-        self.statusBar().showMessage(f"Transcription process complete. {message}")
-        
+            @extract_ffmpeg.on("progress")
+            def on_extract_progress(progress: Progress):
+                self.update_status(
+                    f"Extracting video: {progress.frame}/{progress.total}"
+                )
+
+            await extract_ffmpeg.execute()
+            self.update_status("Video segment extracted successfully.")
+
+            # Convert to audio
+            self.update_status("Converting video to audio...")
+            audio_ffmpeg = (
+                FFmpeg()
+                .option("y")
+                .input(sermon_video)
+                .output(sermon_audio, acodec="pcm_s16le", ac=1, ar=16000)
+            )
+
+            @audio_ffmpeg.on("progress")
+            def on_audio_progress(progress: Progress):
+                self.update_status(
+                    f"Converting to audio: {progress.frame}/{progress.total}"
+                )
+
+            await audio_ffmpeg.execute()
+            self.update_status("Audio conversion completed successfully.")
+
+            # Transcribe
+            self.update_status("Transcribing audio...")
+            whisper_cmd = [
+                "/Users/ted/dev/whisper.cpp/build/bin/whisper-cli",
+                "-m",
+                "/Users/ted/dev/whisper.cpp/models/ggml-large-v3.bin",
+                "-np",
+                "-nt",
+                "-f",
+                sermon_audio,
+            ]
+
+            whisper_process = await asyncio.create_subprocess_exec(
+                *whisper_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            stdout, stderr = await whisper_process.communicate()
+            if whisper_process.returncode == 0:
+                with open(sermon_text, "w") as f:
+                    f.write(stdout.decode())
+                self.update_status("Transcription completed successfully.")
+            else:
+                self.update_status(f"Transcription failed: {stderr.decode()}")
+
+            self.statusBar().showMessage("Transcription process complete.")
+        except Exception as e:
+            self.statusBar().showMessage(f"Error during processing: {str(e)}")
     def update_status(self, message):
         """Update the status bar message."""
         self.statusBar().showMessage(message)
@@ -327,4 +304,7 @@ class WorshipServiceEditor(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = WorshipServiceEditor()
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(window.start_extract_and_transcribe())
     sys.exit(app.exec())
