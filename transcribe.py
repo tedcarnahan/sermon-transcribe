@@ -1,8 +1,6 @@
-#!./.venv/bin/python
-
 import sys
 import vlc
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
     QWidget,
@@ -13,14 +11,126 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QSlider,
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PySide6.QtCore import Qt, QTimer, QThread, Signal
 import subprocess
 import os
 from datetime import datetime
 from urllib.parse import unquote
-import asyncio
-from ffmpeg import Progress
-from ffmpeg.asyncio import FFmpeg
+from ffmpeg import FFmpeg
+
+
+class ExtractAndTranscribeThread(QThread):
+    status_update = Signal(str)
+    finished = Signal(str)
+
+    def __init__(self, input_file, in_point, out_point, base_name):
+        super().__init__()
+        self.input_file = input_file
+        self.in_point = in_point
+        self.out_point = out_point
+        self.base_name = base_name
+        self.is_cancelled = False
+
+    def run(self):
+        try:
+            input_dir = os.path.dirname(self.input_file)
+            sermon_video = os.path.join(input_dir, f"{self.base_name} sermon.mp4")
+            sermon_audio = os.path.join(input_dir, f"{self.base_name} sermon.wav")
+            sermon_text = os.path.join(input_dir, f"{self.base_name} sermon.txt")
+
+            self.video_extract(sermon_video)
+            if self.is_cancelled:
+                return
+
+            self.audio_extract(sermon_video, sermon_audio)
+            if self.is_cancelled:
+                return
+
+            self.transcribe(sermon_audio, sermon_text)
+
+            self.finished.emit("Transcription process complete.")
+        except Exception as e:
+            self.finished.emit(f"Error during processing: {str(e)}")
+
+    def video_extract(self, sermon_video):
+        self.status_update.emit("Preparing to extract video segment...")
+        in_time = self.format_time_with_ms(self.in_point / 1000)
+        out_time = self.format_time_with_ms(self.out_point / 1000)
+
+        extract_video = (
+            FFmpeg()
+            .option("y")
+            .input(self.input_file, ss=in_time)
+            .output(sermon_video, to=out_time, codec="copy")
+        )
+
+        extract_video.execute()
+        self.status_update.emit("Video segment extracted successfully.")
+
+    def audio_extract(self, video_file, audio_file):
+        self.status_update.emit("Converting video to audio...")
+
+        extract_audio = (
+            FFmpeg()
+            .option("y")
+            .input(video_file)
+            .output(audio_file, acodec="pcm_s16le", ac=1, ar=16000)
+        )
+
+        extract_audio.execute()
+        self.status_update.emit("Audio conversion completed successfully.")
+
+    def transcribe(self, sermon_audio, sermon_text):
+        self.status_update.emit("Transcribing audio...")
+
+        whisper_cmd = [
+            "/Users/ted/dev/whisper.cpp/build/bin/whisper-cli",
+            "-m",
+            "/Users/ted/dev/whisper.cpp/models/ggml-large-v3.bin",
+            "-np",
+            "-nt",
+            "-f",
+            sermon_audio,
+        ]
+
+        process = subprocess.Popen(
+            whisper_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+
+        # Initialize an empty list to store the output
+        transcription_output = []
+
+        while True:
+            if self.is_cancelled:
+                process.terminate()
+                self.status_update.emit("Transcription cancelled.")
+                return
+
+            output = process.stdout.readline()
+            if output:
+                transcription_output.append(output.strip())
+            if output == "" and process.poll() is not None:
+                break
+
+        if process.returncode == 0:
+            with open(sermon_text, "w") as f:
+                # Join the lines and write to the file
+                f.write("\n".join(transcription_output))
+            self.status_update.emit("Transcription completed successfully.")
+        else:
+            self.status_update.emit(f"Transcription failed: {process.stderr.read()}")
+
+    def format_time_with_ms(self, seconds):
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        seconds = seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+
+    def cancel(self):
+        self.is_cancelled = True
 
 
 class WorshipServiceEditor(QMainWindow):
@@ -85,7 +195,7 @@ class WorshipServiceEditor(QMainWindow):
         points_layout.addWidget(self.out_label)
         layout.addLayout(points_layout)
 
-        # Process buttons (removed process_button)
+        # Process buttons
         self.transcribe_button = QPushButton("Extract and Transcribe")
         self.transcribe_button.clicked.connect(self.start_extract_and_transcribe)
         layout.addWidget(self.transcribe_button)
@@ -94,6 +204,7 @@ class WorshipServiceEditor(QMainWindow):
         self.playing = False
         self.in_point = 0
         self.out_point = 0
+        self.extraction_thread = None
 
         # Timer for updates
         self.timer = QTimer(self)
@@ -214,10 +325,7 @@ class WorshipServiceEditor(QMainWindow):
         self.out_label.setText(f"Out: {self.format_time(self.out_point/1000)}")
 
     def start_extract_and_transcribe(self):
-        """
-        Starts the extraction and transcription process asynchronously using python-ffmpeg.
-        """
-        try:
+        if self.extraction_thread is None or not self.extraction_thread.isRunning():
             # Get the input file path from the current media
             input_file = self.player.get_media().get_mrl()
             if input_file.startswith("file://"):
@@ -226,101 +334,40 @@ class WorshipServiceEditor(QMainWindow):
             # URL decode the path
             input_file = unquote(input_file)
 
-            # Get the directory and base name of the input file
-            input_dir = os.path.dirname(input_file)
+            # Get the base name of the input file
             base_name = os.path.splitext(os.path.basename(input_file))[0]
 
-            # Generate output filenames with full paths
-            sermon_video = os.path.join(input_dir, f"{base_name} sermon.mp4")
-            sermon_audio = os.path.join(input_dir, f"{base_name} sermon.wav")
-            sermon_text = os.path.join(input_dir, f"{base_name} sermon.txt")
-
-            # Format timestamps for ffmpeg
-            in_time = self.format_time_with_ms(self.in_point / 1000)
-            out_time = self.format_time_with_ms(self.out_point / 1000)
-
-            # Extract video segment
-            self.update_status(f"Preparing to extract video segment...")
-            extract_ffmpeg = (
-                FFmpeg()
-                .option("y")
-                .input(input_file, ss=in_time)
-                .output(sermon_video, to=out_time, codec="copy")
+            self.extraction_thread = ExtractAndTranscribeThread(
+                input_file, self.in_point, self.out_point, base_name
             )
+            self.extraction_thread.status_update.connect(self.update_status)
+            self.extraction_thread.finished.connect(self.process_finished)
+            self.extraction_thread.start()
 
-            @extract_ffmpeg.on("progress")
-            def on_extract_progress(progress: Progress):
-                self.update_status(
-                    f"Extracting video: {progress.frame}/{progress.total}"
-                )
+            self.transcribe_button.setText("Cancel")
+            self.transcribe_button.clicked.disconnect()
+            self.transcribe_button.clicked.connect(self.cancel_extract_and_transcribe)
+        else:
+            self.cancel_extract_and_transcribe()
 
-            await extract_ffmpeg.execute()
-            self.update_status("Video segment extracted successfully.")
-
-            # Convert to audio
-            self.update_status("Converting video to audio...")
-            audio_ffmpeg = (
-                FFmpeg()
-                .option("y")
-                .input(sermon_video)
-                .output(sermon_audio, acodec="pcm_s16le", ac=1, ar=16000)
-            )
-
-            @audio_ffmpeg.on("progress")
-            def on_audio_progress(progress: Progress):
-                self.update_status(
-                    f"Converting to audio: {progress.frame}/{progress.total}"
-                )
-
-            await audio_ffmpeg.execute()
-            self.update_status("Audio conversion completed successfully.")
-
-            # Transcribe
-            self.update_status("Transcribing audio...")
-            whisper_cmd = [
-                "/Users/ted/dev/whisper.cpp/build/bin/whisper-cli",
-                "-m",
-                "/Users/ted/dev/whisper.cpp/models/ggml-large-v3.bin",
-                "-np",
-                "-nt",
-                "-f",
-                sermon_audio,
-            ]
-
-            whisper_process = await asyncio.create_subprocess_exec(
-                *whisper_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            stdout, stderr = await whisper_process.communicate()
-            if whisper_process.returncode == 0:
-                with open(sermon_text, "w") as f:
-                    f.write(stdout.decode())
-                self.update_status("Transcription completed successfully.")
-            else:
-                self.update_status(f"Transcription failed: {stderr.decode()}")
-
-            self.statusBar().showMessage("Transcription process complete.")
-        except Exception as e:
-            self.statusBar().showMessage(f"Error during processing: {str(e)}")
+    def cancel_extract_and_transcribe(self):
+        if self.extraction_thread and self.extraction_thread.isRunning():
+            self.extraction_thread.cancel()
+            self.extraction_thread.wait()
+            self.process_finished("Process cancelled.")
 
     def update_status(self, message):
-        """Update the status bar message."""
         self.statusBar().showMessage(message)
 
-    def format_time_with_ms(self, seconds):
-        """Format time as HH:MM:SS.mmm for ffmpeg"""
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        seconds = seconds % 60
-        return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+    def process_finished(self, message):
+        self.statusBar().showMessage(message)
+        self.transcribe_button.setText("Extract and Transcribe")
+        self.transcribe_button.clicked.disconnect()
+        self.transcribe_button.clicked.connect(self.start_extract_and_transcribe)
+        self.extraction_thread = None
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = WorshipServiceEditor()
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(window.start_extract_and_transcribe())
     sys.exit(app.exec())
