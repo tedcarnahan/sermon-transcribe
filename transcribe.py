@@ -60,8 +60,8 @@ class ExtractAndTranscribeThread(QThread):
         extract_video = (
             FFmpeg()
             .option("y")
-            .input(self.input_file, ss=in_time)
-            .output(sermon_video, to=out_time, codec="copy")
+            .input(self.input_file, ss=in_time, to=out_time)
+            .output(sermon_video, codec="copy")
         )
 
         extract_video.execute()
