@@ -275,7 +275,7 @@ class WorshipServiceEditor(QMainWindow):
 
     def browse_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Video File", "", "Video Files (*.mp4 *.mov)"
+            self, "Select Video File", "", "Video Files (*.mp4 *.mov *.mkv)"
         )
         if file_path:
             self.load_video(file_path)
@@ -290,6 +290,12 @@ class WorshipServiceEditor(QMainWindow):
             self.playing = False
             self.was_playing = False
             self.is_scrubbing = False
+
+            # Reset in/out points + labels for the *new* video (prevents stale values from previous file)
+            self.in_point = 0
+            self.out_point = 0
+            self.in_label.setText("00:00:00")
+            self.out_label.setText("00:00:00")
 
             # Set video output target *before* set_media (required for reliable embedding on macOS)
             if sys.platform.startswith("darwin"):
@@ -399,6 +405,14 @@ class WorshipServiceEditor(QMainWindow):
         if duration > 0 and duration != 600000:
             self.has_valid_video = True
             self._set_video_controls_enabled(True)
+
+            # Default out point to end of video (in_point stays 0). Update labels.
+            # This is the requested "out point defaults to end on load".
+            # (User can still override later via the set-out button.)
+            self.in_point = 0
+            self.out_point = duration
+            self.in_label.setText(self.format_time(0))
+            self.out_label.setText(self.format_time(duration / 1000))
         else:
             self.has_valid_video = False
             self._set_video_controls_enabled(False)
@@ -508,6 +522,13 @@ class WorshipServiceEditor(QMainWindow):
         if dur > 0 and not getattr(self, "has_valid_video", False):
             self.has_valid_video = True
             self._set_video_controls_enabled(True)
+
+            # Default out point to video end when duration first becomes known via this path.
+            # (Mirrors the logic in _apply_duration for cue/setup paths.)
+            self.in_point = 0
+            self.out_point = dur
+            self.in_label.setText(self.format_time(0))
+            self.out_label.setText(self.format_time(dur / 1000))
         self.timeline.setValue(time_pos)
         self.time_label.setText(self.format_time(time_pos / 1000))
 
