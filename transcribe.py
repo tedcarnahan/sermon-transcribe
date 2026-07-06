@@ -145,6 +145,13 @@ class WorshipServiceEditor(QMainWindow):
         self.instance = vlc.Instance()
         self.player = self.instance.media_player_new()
 
+        # Attach event handlers for state sync (prevents UI desync after seeks/ends)
+        em = self.player.event_manager()
+        em.event_attach(vlc.EventType.MediaPlayerEndReached, self._on_end_reached)
+        em.event_attach(vlc.EventType.MediaPlayerPlaying, self._on_playing)
+        em.event_attach(vlc.EventType.MediaPlayerPaused, self._on_paused)
+        em.event_attach(vlc.EventType.MediaPlayerStopped, self._on_stopped)
+
         # Create central widget and layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -202,6 +209,7 @@ class WorshipServiceEditor(QMainWindow):
 
         # Initialize variables
         self.playing = False
+        self.was_playing = False
         self.in_point = 0
         self.out_point = 0
         self.extraction_thread = None
@@ -229,6 +237,9 @@ class WorshipServiceEditor(QMainWindow):
             # Stop any existing playback
             self.player.stop()
             self.statusBar().showMessage("Loading video...")
+            self.playing = False
+            self.was_playing = False
+            self.is_scrubbing = False
 
             # Create a new media
             media = self.instance.media_new(file_path)
@@ -243,9 +254,9 @@ class WorshipServiceEditor(QMainWindow):
             else:
                 self.player.set_xwindow(self.video_widget.winId())
 
-            # Wait for media to be ready
-            self.player.play()
-            QTimer.singleShot(500, self.setup_timeline)
+            # Prepare timeline without auto-playing (avoid brief play glitch + deadlock risk)
+            QTimer.singleShot(300, self.setup_timeline)
+            self.play_button.setText("Play")
             self.statusBar().showMessage("Video loaded successfully")
 
         except Exception as e:
@@ -253,25 +264,59 @@ class WorshipServiceEditor(QMainWindow):
             print(f"Error loading video: {e}")
 
     def setup_timeline(self):
-        """Set up timeline after media is loaded"""
+        """Set up timeline after media is loaded. Starts paused."""
         try:
-            # Pause the playback
-            self.player.pause()
-
-            # Get the duration
             duration = self.player.get_length()
-            print(f"Video duration: {duration}")  # Debug print
+            if duration <= 0:
+                # Fallback: try brief play to populate length, then stop
+                self.player.play()
+                QTimer.singleShot(200, lambda: self._finish_setup_after_play())
+                return
 
-            # Set up timeline with the duration
-            self.timeline.setRange(0, duration)
-            self.timeline.setValue(0)
-            self.timeline.show()  # Ensure the timeline is visible
-
-            # Update the time label
-            self.time_label.setText(self.format_time(0))
+            self._apply_duration(duration)
 
         except Exception as e:
             print(f"Error setting up timeline: {e}")
+
+    def _finish_setup_after_play(self):
+        try:
+            self.player.stop()
+            duration = self.player.get_length()
+            self._apply_duration(duration)
+        except Exception as e:
+            print(f"Error in fallback setup: {e}")
+
+    def _apply_duration(self, duration):
+        self.timeline.setRange(0, duration)
+        self.timeline.setValue(0)
+        self.timeline.show()
+        self.time_label.setText(self.format_time(0))
+        # Ensure paused at start
+        self.player.pause()
+        self.playing = False
+        self.play_button.setText("Play")
+
+    def _on_end_reached(self, event):
+        """Handle end of media (e.g. scrubbed to end or natural end)."""
+        self.playing = False
+        self.was_playing = False
+        self.is_scrubbing = False
+        self.play_button.setText("Play")
+        # Keep timeline at end; allow replay via play (will restart)
+        print("Media end reached (or seeked to end)")
+
+    def _on_playing(self, event):
+        self.play_button.setText("Pause")
+        self.playing = True
+
+    def _on_paused(self, event):
+        self.play_button.setText("Play")
+        self.playing = False
+
+    def _on_stopped(self, event):
+        self.play_button.setText("Play")
+        self.playing = False
+        self.was_playing = False
 
     def toggle_play(self):
         if self.player.is_playing():
@@ -280,6 +325,13 @@ class WorshipServiceEditor(QMainWindow):
             self.playing = False
             self.statusBar().showMessage("Paused")
         else:
+            state = self.player.get_state()
+            if state in (vlc.State.Ended, vlc.State.Stopped):
+                # Restart from beginning after end/seek-to-end (common for scrub-to-end)
+                self.player.stop()
+                self.player.set_time(0)
+                self.timeline.setValue(0)
+                self.time_label.setText(self.format_time(0))
             self.player.play()
             self.play_button.setText("Pause")
             self.playing = True
@@ -288,17 +340,32 @@ class WorshipServiceEditor(QMainWindow):
     def on_timeline_press(self):
         """Called when user starts dragging the timeline"""
         self.is_scrubbing = True
-        if self.player.is_playing():
+        self.was_playing = self.player.is_playing()
+        if self.was_playing:
             self.player.pause()
+            # Button stays reflecting prior "playing" intent until release or toggle
 
     def on_timeline_release(self):
         """Called when user releases the timeline"""
         self.is_scrubbing = False
-        if self.playing:
-            self.player.play()
+        if self.was_playing:
+            state = self.player.get_state()
+            if state in (vlc.State.Ended, vlc.State.Stopped):
+                # If released at end, don't auto-resume (or restart?); leave paused at end
+                self.playing = False
+                self.play_button.setText("Play")
+            else:
+                self.player.play()
+                # event will sync button/flag
+        self.was_playing = False
 
     def on_timeline_change(self, value):
-        """Called while dragging the timeline"""
+        """Called while dragging the timeline.
+        Pause is done in press; seek here. Clamp near end to avoid deadlock issues.
+        """
+        duration = self.timeline.maximum()
+        if duration > 0 and value > duration - 100:  # ~100ms buffer from very end
+            value = duration
         self.player.set_time(value)
         # Update time label immediately during scrubbing
         self.time_label.setText(self.format_time(value / 1000))
