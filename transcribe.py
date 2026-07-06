@@ -241,12 +241,7 @@ class WorshipServiceEditor(QMainWindow):
             self.was_playing = False
             self.is_scrubbing = False
 
-            # Create a new media
-            media = self.instance.media_new(file_path)
-            media.parse_with_options(vlc.MediaParseFlag.local, 0)
-            self.player.set_media(media)
-
-            # Set up video output
+            # Set video output target *before* set_media (required for reliable embedding on macOS)
             if sys.platform.startswith("darwin"):
                 self.player.set_nsobject(int(self.video_widget.winId()))
             elif sys.platform.startswith("win"):
@@ -254,8 +249,23 @@ class WorshipServiceEditor(QMainWindow):
             else:
                 self.player.set_xwindow(self.video_widget.winId())
 
-            # Prepare timeline without auto-playing (avoid brief play glitch + deadlock risk)
-            QTimer.singleShot(300, self.setup_timeline)
+            # Create a new media
+            media = self.instance.media_new(file_path)
+            media.parse_with_options(vlc.MediaParseFlag.local, 0)
+            self.player.set_media(media)
+
+            # Ensure timeline (playhead bar) is visible with placeholder range immediately.
+            # Real duration will override once known (via cue or update_ui).
+            self.timeline.setRange(0, 600000)  # ~10min placeholder so bar renders visibly
+            self.timeline.setValue(0)
+            self.timeline.setVisible(True)
+            self.timeline.show()
+            self.timeline.update()
+            self.time_label.setText(self.format_time(0))
+
+            # Cue a brief play/pause so first frame renders and sticks (without leaving playing).
+            # Delay lets embedding settle and avoids prior deadlock issues.
+            QTimer.singleShot(250, self._cue_initial_frame)
             self.play_button.setText("Play")
             self.statusBar().showMessage("Video loaded successfully")
 
@@ -263,12 +273,47 @@ class WorshipServiceEditor(QMainWindow):
             self.statusBar().showMessage(f"Error loading video: {e}")
             print(f"Error loading video: {e}")
 
+    def _cue_initial_frame(self):
+        """Play briefly to force first-frame render into the video widget, then pause+setup.
+        This keeps the initial frame visible (unlike stop() which blacks it out).
+        """
+        try:
+            self.player.play()
+            # Short delay to let first frame decode/render, then pause.
+            QTimer.singleShot(80, self._pause_and_setup)
+        except Exception as e:
+            print(f"Error cueing initial frame: {e}")
+            # Fallback to old setup path
+            self.setup_timeline()
+
+    def _pause_and_setup(self):
+        try:
+            self.player.pause()
+            # Force to start to ensure consistent first frame is the one shown.
+            self.player.set_time(0)
+            duration = self.player.get_length()
+            if duration <= 0:
+                # Keep placeholder; update_ui will upgrade range once duration known
+                duration = 600000
+            self._apply_duration(duration)
+            # Force clean paused state (events should have synced, but be explicit)
+            self.playing = False
+            self.was_playing = False
+            self.is_scrubbing = False
+            self.play_button.setText("Play")
+            # Repaint to help the paused frame stick in the video widget on macOS
+            self.video_widget.update()
+            self.timeline.update()
+        except Exception as e:
+            print(f"Error in pause-and-setup: {e}")
+            self.setup_timeline()
+
     def setup_timeline(self):
-        """Set up timeline after media is loaded. Starts paused."""
+        """Legacy/fallback path. Set up timeline after media is loaded. Starts paused."""
         try:
             duration = self.player.get_length()
             if duration <= 0:
-                # Fallback: try brief play to populate length, then stop
+                # Fallback: try brief play to populate length, then stop (legacy, may black frame)
                 self.player.play()
                 QTimer.singleShot(200, lambda: self._finish_setup_after_play())
                 return
@@ -289,10 +334,11 @@ class WorshipServiceEditor(QMainWindow):
     def _apply_duration(self, duration):
         self.timeline.setRange(0, duration)
         self.timeline.setValue(0)
+        self.timeline.setVisible(True)
         self.timeline.show()
+        self.timeline.update()
         self.time_label.setText(self.format_time(0))
-        # Ensure paused at start
-        self.player.pause()
+        # Do not pause here (caller already did for cue path); legacy fallbacks may rely on it
         self.playing = False
         self.play_button.setText("Play")
 
@@ -371,11 +417,21 @@ class WorshipServiceEditor(QMainWindow):
         self.time_label.setText(self.format_time(value / 1000))
 
     def update_ui(self):
-        """Regular UI updates"""
-        if self.player.is_playing() and not self.is_scrubbing:
-            time_pos = self.player.get_time()
-            self.timeline.setValue(time_pos)
-            self.time_label.setText(self.format_time(time_pos / 1000))
+        """Regular UI updates. Always sync position when not scrubbing (works for paused too).
+        Also auto-upgrades timeline range once real duration is available from VLC.
+        """
+        if self.is_scrubbing:
+            return
+        time_pos = self.player.get_time()
+        if time_pos < 0:
+            return
+        dur = self.player.get_length()
+        if dur > 0 and dur != self.timeline.maximum():
+            self.timeline.setRange(0, dur)
+            if self.timeline.value() > dur:
+                self.timeline.setValue(dur)
+        self.timeline.setValue(time_pos)
+        self.time_label.setText(self.format_time(time_pos / 1000))
 
     def format_time(self, seconds):
         hours = int(seconds // 3600)
