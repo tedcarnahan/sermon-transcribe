@@ -189,17 +189,25 @@ class WorshipServiceEditor(QMainWindow):
 
         # In/Out points
         points_layout = QHBoxLayout()
-        self.in_button = QPushButton("Set In Point")
+        self.in_button = QPushButton("]")
         self.in_button.clicked.connect(self.set_in_point)
         self.in_label = QLabel("In: 00:00:00")
         points_layout.addWidget(self.in_button)
         points_layout.addWidget(self.in_label)
 
-        self.out_button = QPushButton("Set Out Point")
+        self.jump_in_button = QPushButton("]←")
+        self.jump_in_button.clicked.connect(self.jump_to_in_point)
+        points_layout.addWidget(self.jump_in_button)
+
+        self.out_button = QPushButton("[")
         self.out_button.clicked.connect(self.set_out_point)
         self.out_label = QLabel("Out: 00:00:00")
         points_layout.addWidget(self.out_button)
         points_layout.addWidget(self.out_label)
+
+        self.jump_out_button = QPushButton("→[")
+        self.jump_out_button.clicked.connect(self.jump_to_out_point)
+        points_layout.addWidget(self.jump_out_button)
         layout.addLayout(points_layout)
 
         # Process buttons
@@ -446,6 +454,85 @@ class WorshipServiceEditor(QMainWindow):
     def set_out_point(self):
         self.out_point = self.player.get_time()
         self.out_label.setText(f"Out: {self.format_time(self.out_point/1000)}")
+
+    def jump_to_in_point(self):
+        """Jump playhead (and UI) to the current in_point.
+        If video was playing, resume playing after the jump for smooth continuation.
+        Pause briefly only for the seek to avoid VLC buffer/deadlock issues.
+        """
+        if not hasattr(self, 'in_point'):
+            return
+        try:
+            was_playing = self.player.is_playing()
+            if was_playing:
+                self.player.pause()
+                # Do not force flags yet; will resume
+
+            target = self.in_point
+            duration = self.player.get_length()
+            if duration > 0 and target > duration:
+                target = duration
+
+            self.player.set_time(target)
+            self.timeline.setValue(target)
+            self.time_label.setText(self.format_time(target / 1000))
+
+            if was_playing:
+                state = self.player.get_state()
+                if state in (vlc.State.Ended, vlc.State.Stopped):
+                    self.playing = False
+                    self.play_button.setText("Play")
+                else:
+                    self.player.play()
+                    # _on_playing event will sync button + self.playing=True
+                self.was_playing = False
+            else:
+                self.play_button.setText("Play")
+                self.playing = False
+            self.is_scrubbing = False
+        except Exception as e:
+            self.statusBar().showMessage(f"Error jumping to in point: {e}")
+            print(f"Error jumping to in point: {e}")
+
+    def jump_to_out_point(self):
+        """Jump playhead (and UI) to the current out_point.
+        If video was playing, resume playing after the jump for smooth continuation.
+        Pause briefly only for the seek to avoid VLC buffer/deadlock issues.
+        Symmetric to jump_to_in_point.
+        """
+        if not hasattr(self, 'out_point'):
+            return
+        try:
+            was_playing = self.player.is_playing()
+            if was_playing:
+                self.player.pause()
+                # Do not force flags yet; will resume
+
+            target = self.out_point
+            duration = self.player.get_length()
+            if duration > 0 and target > duration:
+                target = duration
+
+            self.player.set_time(target)
+            self.timeline.setValue(target)
+            self.time_label.setText(self.format_time(target / 1000))
+
+            if was_playing:
+                state = self.player.get_state()
+                if state in (vlc.State.Ended, vlc.State.Stopped):
+                    self.playing = False
+                    self.play_button.setText("Play")
+                else:
+                    self.player.play()
+                    # _on_playing event will sync button + self.playing=True
+                self.was_playing = False
+            else:
+                self.play_button.setText("Play")
+                self.playing = False
+            self.is_scrubbing = False
+        except Exception as e:
+            self.statusBar().showMessage(f"Error jumping to out point: {e}")
+            print(f"Error jumping to out point: {e}")
 
     def start_extract_and_transcribe(self):
         if self.extraction_thread is None or not self.extraction_thread.isRunning():
