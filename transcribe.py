@@ -256,6 +256,7 @@ class WorshipServiceEditor(QMainWindow):
         self.in_point = 0
         self.out_point = 0
         self.extraction_thread = None
+        self.has_valid_video = False
 
         # Timer for updates
         self.timer = QTimer(self)
@@ -265,6 +266,10 @@ class WorshipServiceEditor(QMainWindow):
 
         # Add scrubbing state
         self.is_scrubbing = False
+
+        # Start with no video loaded: disable all media controls
+        # (timeline scrubber + in/out + play/pause buttons)
+        self._set_video_controls_enabled(False)
 
         self.show()
 
@@ -279,6 +284,8 @@ class WorshipServiceEditor(QMainWindow):
         try:
             # Stop any existing playback
             self.player.stop()
+            self.has_valid_video = False
+            self._set_video_controls_enabled(False)  # disable until successful load of this file
             self.statusBar().showMessage("Loading video...")
             self.playing = False
             self.was_playing = False
@@ -313,6 +320,8 @@ class WorshipServiceEditor(QMainWindow):
             self.statusBar().showMessage("Video loaded successfully")
 
         except Exception as e:
+            self.has_valid_video = False
+            self._set_video_controls_enabled(False)
             self.statusBar().showMessage(f"Error loading video: {e}")
             print(f"Error loading video: {e}")
 
@@ -384,6 +393,15 @@ class WorshipServiceEditor(QMainWindow):
         # Do not pause here (caller already did for cue path); legacy fallbacks may rely on it
         self.playing = False
         self.play_button.setText("▶️")
+
+        # Only consider "valid video loaded" (and enable controls) when we have a real positive duration.
+        # Placeholder (600000) or <=0 means load not yet succeeded or invalid file.
+        if duration > 0 and duration != 600000:
+            self.has_valid_video = True
+            self._set_video_controls_enabled(True)
+        else:
+            self.has_valid_video = False
+            self._set_video_controls_enabled(False)
 
     def _on_end_reached(self, event):
         """Handle end of media (e.g. scrubbed to end or natural end)."""
@@ -473,6 +491,9 @@ class WorshipServiceEditor(QMainWindow):
             self.timeline.setRange(0, dur)
             if self.timeline.value() > dur:
                 self.timeline.setValue(dur)
+        if dur > 0 and not getattr(self, "has_valid_video", False):
+            self.has_valid_video = True
+            self._set_video_controls_enabled(True)
         self.timeline.setValue(time_pos)
         self.time_label.setText(self.format_time(time_pos / 1000))
 
@@ -610,6 +631,17 @@ class WorshipServiceEditor(QMainWindow):
         self.transcribe_button.clicked.disconnect()
         self.transcribe_button.clicked.connect(self.start_extract_and_transcribe)
         self.extraction_thread = None
+
+    def _set_video_controls_enabled(self, enabled):
+        """Enable or disable the in/out point buttons, play/pause button, and playhead scrubber (timeline).
+        Use when no valid video is loaded (initial state, load error) vs after successful load.
+        """
+        self.timeline.setEnabled(enabled)
+        self.in_button.setEnabled(enabled)
+        self.jump_in_button.setEnabled(enabled)
+        self.play_button.setEnabled(enabled)
+        self.jump_out_button.setEnabled(enabled)
+        self.out_button.setEnabled(enabled)
 
 
 if __name__ == "__main__":
