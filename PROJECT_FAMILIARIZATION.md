@@ -14,7 +14,7 @@ A desktop GUI application (PySide6) for assisting manual transcription of sermon
 Target use: fast local processing on macOS (especially Apple Silicon) for church sermon audio.
 
 ## Tech Stack & Structure
-- **Language/Runtime**: Python >=3.12, managed with Poetry.
+- **Language/Runtime**: Python >=3.12, managed with uv.
 - **GUI**: PySide6 (Qt), single `WorshipServiceEditor` QMainWindow + background `ExtractAndTranscribeThread`.
 - **Media**: python-vlc for player + native video widget embedding (darwin/win/x11).
 - **Processing**: `python-ffmpeg`, `subprocess`.
@@ -31,7 +31,7 @@ Target use: fast local processing on macOS (especially Apple Silicon) for church
 - **No tests**, no other .py modules, minimal structure.
 
 ## Current State (from README + code)
-- **Run**: `poetry install` then `poetry run python transcribe.py`
+- **Run**: `uv sync` then `uv run python transcribe.py`
 - **Workflow** (per README): select video → scrub + set in/out → Extract and Transcribe → results in same folder.
 - **Known Limitations** (explicit in README):
   - Whisper.cpp path/model hardcoded (custom Core ML optimized build for 3x speed on Mac Silicon).
@@ -42,7 +42,7 @@ Target use: fast local processing on macOS (especially Apple Silicon) for church
 - `transcribe.py`
 - `README.md`
 - `pyproject.toml`
-- `poetry.lock`
+- `uv.lock`
 - `pyinstaller.spec`
 - `.gitignore`
 - `res/`

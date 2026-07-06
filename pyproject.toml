@@ -10,15 +10,18 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "python-vlc (>=3.0.21203,<4.0.0)",
     "python-ffmpeg (>=2.0.12,<3.0.0)",
-    "pyside6 (>=6.8.2.1,<7.0.0.0)"
+    "pyside6 (>=6.8.2.1,<7.0.0.0)",
+    "pyvlc (>=1.0.1,<2.0.0)"
 ]
 
 
 [build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
 
-[tool.poetry.group.dev.dependencies]
-pyinstaller = "^6.12.0"
+[project.optional-dependencies]
+dev = [
+    "pyinstaller>=6.12.0,<7"
+]
 
 
