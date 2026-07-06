@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QFileDialog,
     QSlider,
+    QGroupBox,
 )
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
 import subprocess
@@ -169,45 +170,79 @@ class WorshipServiceEditor(QMainWindow):
         file_layout.addWidget(self.file_button)
         layout.addLayout(file_layout)
 
-        # Controls
-        controls_layout = QHBoxLayout()
-        self.play_button = QPushButton("Play")
-        self.play_button.clicked.connect(self.toggle_play)
-        controls_layout.addWidget(self.play_button)
-
-        # Enhanced timeline with scrubbing
+        # Timeline scrubber (full width above button row)
         self.timeline = QSlider(Qt.Orientation.Horizontal)
         self.timeline.setMinimum(0)
         self.timeline.sliderMoved.connect(self.on_timeline_change)
         self.timeline.sliderPressed.connect(self.on_timeline_press)
         self.timeline.sliderReleased.connect(self.on_timeline_release)
-        controls_layout.addWidget(self.timeline)
+        layout.addWidget(self.timeline)
 
-        self.time_label = QLabel("00:00:00")
-        controls_layout.addWidget(self.time_label)
-        layout.addLayout(controls_layout)
-
-        # In/Out points
+        # In/Out points row:
+        # Left: QGroupBox("In:") containing set-in + jump-in buttons + centered timestamp label
+        # Center: QGroupBox("Playhead:") with play/pause button (▶️/⏸️) above the time label
+        # Right: QGroupBox("Out:") containing jump-out + set-out buttons + centered timestamp label
         points_layout = QHBoxLayout()
+
+        emoji_style = """
+    QPushButton {
+        background: transparent;
+        border: none;
+        font-size: 24px; /* Adjust size of the emoji */
+    }
+"""
+
+        # In group box
+        in_group = QGroupBox("In:")
+        in_v = QVBoxLayout()
+        in_buttons_h = QHBoxLayout()
         self.in_button = QPushButton("]")
+        self.in_button.setStyleSheet(emoji_style)
         self.in_button.clicked.connect(self.set_in_point)
-        self.in_label = QLabel("In: 00:00:00")
-        points_layout.addWidget(self.in_button)
-        points_layout.addWidget(self.in_label)
-
+        in_buttons_h.addWidget(self.in_button)
         self.jump_in_button = QPushButton("]←")
+        self.jump_in_button.setStyleSheet(emoji_style)
         self.jump_in_button.clicked.connect(self.jump_to_in_point)
-        points_layout.addWidget(self.jump_in_button)
+        in_buttons_h.addWidget(self.jump_in_button)
+        in_v.addLayout(in_buttons_h)
+        self.in_label = QLabel("00:00:00")
+        self.in_label.setAlignment(Qt.AlignCenter)
+        in_v.addWidget(self.in_label)
+        in_group.setLayout(in_v)
+        points_layout.addWidget(in_group)
 
-        self.out_button = QPushButton("[")
-        self.out_button.clicked.connect(self.set_out_point)
-        self.out_label = QLabel("Out: 00:00:00")
-        points_layout.addWidget(self.out_button)
-        points_layout.addWidget(self.out_label)
+        # Playhead group: play/pause button above the current playback time label
+        playhead_group = QGroupBox("Playhead:")
+        playhead_v = QVBoxLayout()
+        self.play_button = QPushButton("▶️")
+        self.play_button.setStyleSheet(emoji_style)
+        self.play_button.clicked.connect(self.toggle_play)
+        playhead_v.addWidget(self.play_button)
+        self.time_label = QLabel("00:00:00")
+        self.time_label.setAlignment(Qt.AlignCenter)
+        playhead_v.addWidget(self.time_label)
+        playhead_group.setLayout(playhead_v)
+        points_layout.addWidget(playhead_group)
 
+        # Out group box
+        out_group = QGroupBox("Out:")
+        out_v = QVBoxLayout()
+        out_buttons_h = QHBoxLayout()
         self.jump_out_button = QPushButton("→[")
+        self.jump_out_button.setStyleSheet(emoji_style)
         self.jump_out_button.clicked.connect(self.jump_to_out_point)
-        points_layout.addWidget(self.jump_out_button)
+        out_buttons_h.addWidget(self.jump_out_button)
+        self.out_button = QPushButton("[")
+        self.out_button.setStyleSheet(emoji_style)
+        self.out_button.clicked.connect(self.set_out_point)
+        out_buttons_h.addWidget(self.out_button)
+        out_v.addLayout(out_buttons_h)
+        self.out_label = QLabel("00:00:00")
+        self.out_label.setAlignment(Qt.AlignCenter)
+        out_v.addWidget(self.out_label)
+        out_group.setLayout(out_v)
+        points_layout.addWidget(out_group)
+
         layout.addLayout(points_layout)
 
         # Process buttons
@@ -274,7 +309,7 @@ class WorshipServiceEditor(QMainWindow):
             # Cue a brief play/pause so first frame renders and sticks (without leaving playing).
             # Delay lets embedding settle and avoids prior deadlock issues.
             QTimer.singleShot(250, self._cue_initial_frame)
-            self.play_button.setText("Play")
+            self.play_button.setText("▶️")
             self.statusBar().showMessage("Video loaded successfully")
 
         except Exception as e:
@@ -308,7 +343,7 @@ class WorshipServiceEditor(QMainWindow):
             self.playing = False
             self.was_playing = False
             self.is_scrubbing = False
-            self.play_button.setText("Play")
+            self.play_button.setText("▶️")
             # Repaint to help the paused frame stick in the video widget on macOS
             self.video_widget.update()
             self.timeline.update()
@@ -348,34 +383,34 @@ class WorshipServiceEditor(QMainWindow):
         self.time_label.setText(self.format_time(0))
         # Do not pause here (caller already did for cue path); legacy fallbacks may rely on it
         self.playing = False
-        self.play_button.setText("Play")
+        self.play_button.setText("▶️")
 
     def _on_end_reached(self, event):
         """Handle end of media (e.g. scrubbed to end or natural end)."""
         self.playing = False
         self.was_playing = False
         self.is_scrubbing = False
-        self.play_button.setText("Play")
+        self.play_button.setText("▶️")
         # Keep timeline at end; allow replay via play (will restart)
         print("Media end reached (or seeked to end)")
 
     def _on_playing(self, event):
-        self.play_button.setText("Pause")
+        self.play_button.setText("⏸️")
         self.playing = True
 
     def _on_paused(self, event):
-        self.play_button.setText("Play")
+        self.play_button.setText("▶️")
         self.playing = False
 
     def _on_stopped(self, event):
-        self.play_button.setText("Play")
+        self.play_button.setText("▶️")
         self.playing = False
         self.was_playing = False
 
     def toggle_play(self):
         if self.player.is_playing():
             self.player.pause()
-            self.play_button.setText("Play")
+            self.play_button.setText("▶️")
             self.playing = False
             self.statusBar().showMessage("Paused")
         else:
@@ -387,7 +422,7 @@ class WorshipServiceEditor(QMainWindow):
                 self.timeline.setValue(0)
                 self.time_label.setText(self.format_time(0))
             self.player.play()
-            self.play_button.setText("Pause")
+            self.play_button.setText("⏸️")
             self.playing = True
             self.statusBar().showMessage("Playing")
 
@@ -407,7 +442,7 @@ class WorshipServiceEditor(QMainWindow):
             if state in (vlc.State.Ended, vlc.State.Stopped):
                 # If released at end, don't auto-resume (or restart?); leave paused at end
                 self.playing = False
-                self.play_button.setText("Play")
+                self.play_button.setText("▶️")
             else:
                 self.player.play()
                 # event will sync button/flag
@@ -449,11 +484,11 @@ class WorshipServiceEditor(QMainWindow):
 
     def set_in_point(self):
         self.in_point = self.player.get_time()
-        self.in_label.setText(f"In: {self.format_time(self.in_point/1000)}")
+        self.in_label.setText(self.format_time(self.in_point/1000))
 
     def set_out_point(self):
         self.out_point = self.player.get_time()
-        self.out_label.setText(f"Out: {self.format_time(self.out_point/1000)}")
+        self.out_label.setText(self.format_time(self.out_point/1000))
 
     def jump_to_in_point(self):
         """Jump playhead (and UI) to the current in_point.
@@ -481,13 +516,13 @@ class WorshipServiceEditor(QMainWindow):
                 state = self.player.get_state()
                 if state in (vlc.State.Ended, vlc.State.Stopped):
                     self.playing = False
-                    self.play_button.setText("Play")
+                    self.play_button.setText("▶️")
                 else:
                     self.player.play()
                     # _on_playing event will sync button + self.playing=True
                 self.was_playing = False
             else:
-                self.play_button.setText("Play")
+                self.play_button.setText("▶️")
                 self.playing = False
             self.is_scrubbing = False
         except Exception as e:
@@ -521,13 +556,13 @@ class WorshipServiceEditor(QMainWindow):
                 state = self.player.get_state()
                 if state in (vlc.State.Ended, vlc.State.Stopped):
                     self.playing = False
-                    self.play_button.setText("Play")
+                    self.play_button.setText("▶️")
                 else:
                     self.player.play()
                     # _on_playing event will sync button + self.playing=True
                 self.was_playing = False
             else:
-                self.play_button.setText("Play")
+                self.play_button.setText("▶️")
                 self.playing = False
             self.is_scrubbing = False
         except Exception as e:
