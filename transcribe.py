@@ -173,7 +173,7 @@ class WorshipServiceEditor(QMainWindow):
         # Timeline scrubber (full width above button row)
         self.timeline = QSlider(Qt.Orientation.Horizontal)
         self.timeline.setMinimum(0)
-        self.timeline.sliderMoved.connect(self.on_timeline_change)
+        self.timeline.valueChanged.connect(self.on_timeline_change)
         self.timeline.sliderPressed.connect(self.on_timeline_press)
         self.timeline.sliderReleased.connect(self.on_timeline_release)
         layout.addWidget(self.timeline)
@@ -453,8 +453,19 @@ class WorshipServiceEditor(QMainWindow):
             # Button stays reflecting prior "playing" intent until release or toggle
 
     def on_timeline_release(self):
-        """Called when user releases the timeline"""
+        """Called when user releases the timeline (after click or drag).
+        Always seek to final slider value to ensure click-to-jump works reliably.
+        Then resume play if it was playing before press (except at end).
+        """
         self.is_scrubbing = False
+        # Ensure seek to the (possibly clicked) final position. Harmless if already set by change handler.
+        pos = self.timeline.value()
+        duration = self.timeline.maximum()
+        if duration > 0 and pos > duration - 100:
+            pos = duration
+        self.player.set_time(pos)
+        self.time_label.setText(self.format_time(pos / 1000))
+
         if self.was_playing:
             state = self.player.get_state()
             if state in (vlc.State.Ended, vlc.State.Stopped):
@@ -467,9 +478,12 @@ class WorshipServiceEditor(QMainWindow):
         self.was_playing = False
 
     def on_timeline_change(self, value):
-        """Called while dragging the timeline.
+        """Called on user interaction via valueChanged (catches groove clicks reliably + continuous drags).
+        Guard prevents seeking on programmatic setValue (from update_ui, jumps, load, etc.).
         Pause is done in press; seek here. Clamp near end to avoid deadlock issues.
         """
+        if not (getattr(self, "is_scrubbing", False) or self.timeline.isSliderDown()):
+            return
         duration = self.timeline.maximum()
         if duration > 0 and value > duration - 100:  # ~100ms buffer from very end
             value = duration
