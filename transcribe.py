@@ -285,7 +285,9 @@ class WorshipServiceEditor(QMainWindow):
             # Stop any existing playback
             self.player.stop()
             self.has_valid_video = False
-            self._set_video_controls_enabled(False)  # disable until successful load of this file
+            self._set_video_controls_enabled(
+                False
+            )  # disable until successful load of this file
             self.statusBar().showMessage("Loading video...")
             self.playing = False
             self.was_playing = False
@@ -312,7 +314,9 @@ class WorshipServiceEditor(QMainWindow):
 
             # Ensure timeline (playhead bar) is visible with placeholder range immediately.
             # Real duration will override once known (via cue or update_ui).
-            self.timeline.setRange(0, 600000)  # ~10min placeholder so bar renders visibly
+            self.timeline.setRange(
+                0, 600000
+            )  # ~10min placeholder so bar renders visibly
             self.timeline.setValue(0)
             self.timeline.setVisible(True)
             self.timeline.show()
@@ -540,18 +544,18 @@ class WorshipServiceEditor(QMainWindow):
 
     def set_in_point(self):
         self.in_point = self.player.get_time()
-        self.in_label.setText(self.format_time(self.in_point/1000))
+        self.in_label.setText(self.format_time(self.in_point / 1000))
 
     def set_out_point(self):
         self.out_point = self.player.get_time()
-        self.out_label.setText(self.format_time(self.out_point/1000))
+        self.out_label.setText(self.format_time(self.out_point / 1000))
 
     def jump_to_in_point(self):
         """Jump playhead (and UI) to the current in_point.
         If video was playing, resume playing after the jump for smooth continuation.
         Pause briefly only for the seek to avoid VLC buffer/deadlock issues.
         """
-        if not hasattr(self, 'in_point'):
+        if not hasattr(self, "in_point"):
             return
         try:
             was_playing = self.player.is_playing()
@@ -591,7 +595,7 @@ class WorshipServiceEditor(QMainWindow):
         Pause briefly only for the seek to avoid VLC buffer/deadlock issues.
         Symmetric to jump_to_in_point.
         """
-        if not hasattr(self, 'out_point'):
+        if not hasattr(self, "out_point"):
             return
         try:
             was_playing = self.player.is_playing()
