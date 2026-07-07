@@ -1,5 +1,9 @@
 import sys
 import vlc
+import json
+import os
+import platformdirs
+import shutil
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -11,26 +15,98 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QSlider,
     QGroupBox,
+    QDialog,
+    QComboBox,
+    QDialogButtonBox,
+    QLineEdit,
 )
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
 import subprocess
-import os
 from datetime import datetime
 from urllib.parse import unquote
 from ffmpeg import FFmpeg
+
+
+CONFIG_DIR = platformdirs.user_config_dir("sermon-transcribe")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+
+DEFAULT_WHISPER_CLI = "/Users/ted/dev/whisper.cpp/build/bin/whisper-cli"
+DEFAULT_MODELS_DIR = "/Users/ted/dev/whisper.cpp/models"
+
+
+def load_config():
+    try:
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def save_config(config):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        print(f"Failed to save config: {e}")
+
+
+def get_installed_models():
+    """Discover whisper models from the default models directory (ggml-*.bin files)."""
+    models = []
+    if os.path.isdir(DEFAULT_MODELS_DIR):
+        for f in os.listdir(DEFAULT_MODELS_DIR):
+            if f.startswith("ggml-") and f.endswith(".bin"):
+                models.append(f)
+    return sorted(models)
+
+
+def get_default_whisper_cli():
+    """Seek a reasonable default for whisper-cli when no config is loadable on first run.
+    Checks PATH first (whisper-cli, whisper), then common build locations, then falls back to the
+    (possibly non-portable) DEFAULT_WHISPER_CLI.
+    """
+    # 1. PATH lookup (cross platform)
+    for candidate_name in ("whisper-cli", "whisper"):
+        found = shutil.which(candidate_name)
+        if found:
+            return found
+
+    # 2. Common locations (relative to known model dir or user home)
+    base_from_models = os.path.dirname(DEFAULT_MODELS_DIR) if DEFAULT_MODELS_DIR else ""
+    candidates = [
+        os.path.join(base_from_models, "build", "bin", "whisper-cli"),
+        os.path.expanduser("~/whisper.cpp/build/bin/whisper-cli"),
+        os.path.expanduser("~/whisper/build/bin/whisper-cli"),
+        "/usr/local/bin/whisper-cli",
+        "/opt/whisper.cpp/build/bin/whisper-cli",
+        DEFAULT_WHISPER_CLI,  # last resort
+    ]
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+
+    # 3. Absolute fallback (may not exist; user will be prompted to set via settings)
+    return DEFAULT_WHISPER_CLI
+
 
 
 class ExtractAndTranscribeThread(QThread):
     status_update = Signal(str)
     finished = Signal(str)
 
-    def __init__(self, input_file, in_point, out_point, base_name):
+    def __init__(self, input_file, in_point, out_point, base_name, whisper_cli=None, model_path=None):
         super().__init__()
         self.input_file = input_file
         self.in_point = in_point
         self.out_point = out_point
         self.base_name = base_name
         self.is_cancelled = False
+        self.whisper_cli = whisper_cli or get_default_whisper_cli()
+        self.model_path = model_path or os.path.join(DEFAULT_MODELS_DIR, "ggml-large-v3.bin")
+
 
     def run(self):
         try:
@@ -85,9 +161,9 @@ class ExtractAndTranscribeThread(QThread):
         self.status_update.emit("Transcribing audio...")
 
         whisper_cmd = [
-            "/Users/ted/dev/whisper.cpp/build/bin/whisper-cli",
+            self.whisper_cli,
             "-m",
-            "/Users/ted/dev/whisper.cpp/models/ggml-large-v3.bin",
+            self.model_path,
             "-np",
             "-nt",
             "-f",
@@ -132,6 +208,77 @@ class ExtractAndTranscribeThread(QThread):
 
     def cancel(self):
         self.is_cancelled = True
+
+
+class SettingsDialog(QDialog):
+    """Settings dialog for selecting whisper model and configuring the whisper-cli binary path."""
+
+    def __init__(self, parent, available_models, current_model, current_whisper_cli):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(500)
+
+        self.selected_model = current_model
+        self.whisper_cli = current_whisper_cli or ""
+
+        layout = QVBoxLayout(self)
+
+        # Whisper CLI path with file picker
+        layout.addWidget(QLabel("whisper-cli executable:"))
+        cli_layout = QHBoxLayout()
+        self.cli_edit = QLineEdit(self.whisper_cli)
+        self.cli_edit.setReadOnly(True)  # prefer picker over manual edit for safety
+        cli_layout.addWidget(self.cli_edit, 1)
+        self.browse_cli_button = QPushButton("Browse...")
+        self.browse_cli_button.clicked.connect(self._browse_for_whisper_cli)
+        cli_layout.addWidget(self.browse_cli_button)
+        layout.addLayout(cli_layout)
+
+        # Model selection
+        layout.addWidget(QLabel("Whisper Model:"))
+        self.model_combo = QComboBox()
+        if available_models:
+            self.model_combo.addItems(available_models)
+            if current_model in available_models:
+                self.model_combo.setCurrentText(current_model)
+            else:
+                self.model_combo.setCurrentIndex(0)
+        else:
+            self.model_combo.addItem("No models found (ggml-*.bin)")
+            self.model_combo.setEnabled(False)
+        layout.addWidget(self.model_combo)
+
+        layout.addStretch()
+
+        # Dialog buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def _browse_for_whisper_cli(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select whisper-cli executable",
+            self.cli_edit.text() or os.path.dirname(DEFAULT_WHISPER_CLI) or "",
+            "Executables (*);;All files (*)"
+        )
+        if path:
+            self.cli_edit.setText(path)
+            self.whisper_cli = path
+
+    def accept(self):
+        if self.model_combo.isEnabled():
+            self.selected_model = self.model_combo.currentText()
+        if self.cli_edit.text():
+            self.whisper_cli = self.cli_edit.text()
+        super().accept()
+
+    def get_selected_model(self):
+        return self.selected_model
+
+    def get_whisper_cli(self):
+        return self.whisper_cli
 
 
 class WorshipServiceEditor(QMainWindow):
@@ -245,10 +392,18 @@ class WorshipServiceEditor(QMainWindow):
 
         layout.addLayout(points_layout)
 
-        # Process buttons
+        # Process buttons row: main action + small gear/settings button
+        process_layout = QHBoxLayout()
         self.transcribe_button = QPushButton("Extract and Transcribe")
         self.transcribe_button.clicked.connect(self.start_extract_and_transcribe)
-        layout.addWidget(self.transcribe_button)
+        process_layout.addWidget(self.transcribe_button, 1)  # stretch main button
+
+        self.settings_button = QPushButton("⚙️")
+        self.settings_button.setFixedSize(28, 28)
+        self.settings_button.setToolTip("Settings (whisper model + whisper-cli path)")
+        self.settings_button.clicked.connect(self.open_settings)
+        process_layout.addWidget(self.settings_button, 0)
+        layout.addLayout(process_layout)
 
         # Initialize variables
         self.playing = False
@@ -257,6 +412,22 @@ class WorshipServiceEditor(QMainWindow):
         self.out_point = 0
         self.extraction_thread = None
         self.has_valid_video = False
+
+        # Load whisper models and config for settings
+        self.available_models = get_installed_models()
+        config = load_config()
+        self.selected_model = config.get("selected_model")
+        if not self.selected_model or self.selected_model not in self.available_models:
+            self.selected_model = self.available_models[0] if self.available_models else "ggml-large-v3.bin"
+
+        # For whisper_cli: if no loadable config (or no key), seek a reasonable default on first run
+        if not config or "whisper_cli" not in config:
+            self.whisper_cli = get_default_whisper_cli()
+            # Save immediately so the discovered default is persisted
+            config = {"selected_model": self.selected_model, "whisper_cli": self.whisper_cli}
+            save_config(config)
+        else:
+            self.whisper_cli = config.get("whisper_cli") or get_default_whisper_cli()
 
         # Timer for updates
         self.timer = QTimer(self)
@@ -643,7 +814,9 @@ class WorshipServiceEditor(QMainWindow):
             base_name = os.path.splitext(os.path.basename(input_file))[0]
 
             self.extraction_thread = ExtractAndTranscribeThread(
-                input_file, self.in_point, self.out_point, base_name
+                input_file, self.in_point, self.out_point, base_name,
+                whisper_cli=self.whisper_cli,
+                model_path=os.path.join(DEFAULT_MODELS_DIR, self.selected_model) if self.selected_model else None
             )
             self.extraction_thread.status_update.connect(self.update_status)
             self.extraction_thread.finished.connect(self.process_finished)
@@ -670,6 +843,22 @@ class WorshipServiceEditor(QMainWindow):
         self.transcribe_button.clicked.disconnect()
         self.transcribe_button.clicked.connect(self.start_extract_and_transcribe)
         self.extraction_thread = None
+
+    def open_settings(self):
+        """Open the settings dialog and persist chosen model + whisper_cli if accepted."""
+        dialog = SettingsDialog(self, self.available_models, self.selected_model, self.whisper_cli)
+        if dialog.exec():
+            new_model = dialog.get_selected_model()
+            new_cli = dialog.get_whisper_cli()
+            self.selected_model = new_model
+            if new_cli:
+                self.whisper_cli = new_cli
+            # Persist
+            config = load_config()
+            config["selected_model"] = self.selected_model
+            config["whisper_cli"] = self.whisper_cli
+            save_config(config)
+            self.statusBar().showMessage(f"Model set to: {self.selected_model}")
 
     def _set_video_controls_enabled(self, enabled):
         """Enable or disable the in/out point buttons, play/pause button, and playhead scrubber (timeline).
