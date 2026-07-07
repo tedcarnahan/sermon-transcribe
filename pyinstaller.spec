@@ -66,7 +66,7 @@ if sys.platform == 'darwin':
         exe,  # pass exe directly; PyInstaller handles internal COLLECT for BUNDLE on mac
         name='Sermon Transcriber.app',
         icon='res/transcribe.icns',
-        bundle_identifier='com.tedcarnahan.sermon-transcriber',
+        bundle_identifier='com.tedcarnahan.sermon-transcribe',
         info_plist={
             'CFBundleDisplayName': 'Sermon Transcriber',
             'CFBundleName': 'Sermon Transcriber',

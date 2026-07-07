@@ -27,7 +27,7 @@ from urllib.parse import unquote
 from ffmpeg import FFmpeg
 
 
-CONFIG_DIR = platformdirs.user_config_dir("sermon-transcriber")
+CONFIG_DIR = platformdirs.user_config_dir("sermon-transcribe")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULT_WHISPER_CLI = "/Users/ted/dev/whisper.cpp/build/bin/whisper-cli"

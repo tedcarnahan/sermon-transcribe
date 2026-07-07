@@ -1,5 +1,5 @@
 [project]
-name = "sermon-transcriber"
+name = "sermon-transcribe"
 version = "0.1.0"
 description = "GUI for transcribing sermons using FFmpeg and whisper.cpp"
 authors = [
