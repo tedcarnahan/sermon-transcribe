@@ -1,7 +1,7 @@
 [project]
-name = "sermon-transcribe"
+name = "sermon-transcriber"
 version = "0.1.0"
-description = "Assist in transcribing a sermon using whisper.cpp"
+description = "GUI for transcribing sermons using FFmpeg and whisper.cpp"
 authors = [
     {name = "Ted Carnahan",email = "ted@tedcarnahan.com"}
 ]

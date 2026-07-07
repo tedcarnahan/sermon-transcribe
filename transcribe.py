@@ -27,7 +27,7 @@ from urllib.parse import unquote
 from ffmpeg import FFmpeg
 
 
-CONFIG_DIR = platformdirs.user_config_dir("sermon-transcribe")
+CONFIG_DIR = platformdirs.user_config_dir("sermon-transcriber")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULT_WHISPER_CLI = "/Users/ted/dev/whisper.cpp/build/bin/whisper-cli"
@@ -281,10 +281,10 @@ class SettingsDialog(QDialog):
         return self.whisper_cli
 
 
-class WorshipServiceEditor(QMainWindow):
+class SermonTranscriber(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Worship Service Video Editor")
+        self.setWindowTitle("Sermon Transcriber")
 
         # Create status bar
         self.statusBar().showMessage("Ready")
@@ -874,5 +874,5 @@ class WorshipServiceEditor(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = WorshipServiceEditor()
+    window = SermonTranscriber()
     sys.exit(app.exec())
