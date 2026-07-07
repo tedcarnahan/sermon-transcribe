@@ -2,3 +2,7 @@ build/
 dist/
 **/.DS_Store
 .venv/
+
+# Python
+__pycache__/
+*.egg-info/
