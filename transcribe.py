@@ -33,6 +33,13 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 DEFAULT_WHISPER_CLI = "/Users/ted/dev/whisper.cpp/build/bin/whisper-cli"
 DEFAULT_MODELS_DIR = "/Users/ted/dev/whisper.cpp/models"
 
+VIDEO_ENCODER_OPTIONS = [
+    ("H.264", "h264"),
+    ("H.265 / HEVC", "h265"),
+    ("AV1 (SVT)", "av1"),
+]
+DEFAULT_VIDEO_ENCODER = "h264"
+
 
 def load_config():
     try:
@@ -97,7 +104,7 @@ class ExtractAndTranscribeThread(QThread):
     status_update = Signal(str)
     finished = Signal(str)
 
-    def __init__(self, input_file, in_point, out_point, base_name, whisper_cli=None, model_path=None):
+    def __init__(self, input_file, in_point, out_point, base_name, whisper_cli=None, model_path=None, video_encoder=DEFAULT_VIDEO_ENCODER):
         super().__init__()
         self.input_file = input_file
         self.in_point = in_point
@@ -106,6 +113,7 @@ class ExtractAndTranscribeThread(QThread):
         self.is_cancelled = False
         self.whisper_cli = whisper_cli or get_default_whisper_cli()
         self.model_path = model_path or os.path.join(DEFAULT_MODELS_DIR, "ggml-large-v3.bin")
+        self.video_encoder = video_encoder or DEFAULT_VIDEO_ENCODER
 
 
     def run(self):
@@ -134,13 +142,25 @@ class ExtractAndTranscribeThread(QThread):
         in_time = self.format_time_with_ms(self.in_point / 1000)
         out_time = self.format_time_with_ms(self.out_point / 1000)
 
-        extract_video = (
+        extract = (
             FFmpeg()
             .option("y")
             .input(self.input_file, ss=in_time, to=out_time)
-            .output(sermon_video, codec="copy")
         )
 
+        if self.video_encoder == "av1":
+            # Replicate Handbrake AV1 (SVT) settings from user logs:
+            # preset 6, tune=psnr, profile main (default), crf 34.50 (RF), level auto
+            v_opts = {"vcodec": "libsvtav1", "preset": 6, "crf": 34.5, "svtav1-params": "tune=1"}
+        elif self.video_encoder == "h265":
+            v_opts = {"vcodec": "libx265", "preset": "fast", "crf": 30}
+        else:
+            # h264 default
+            v_opts = {"vcodec": "libx264", "preset": "fast", "crf": 28}
+
+        # movflags and encoder options belong on the *output*, not as globals
+        output_opts = {**v_opts, "acodec": "copy", "movflags": "+faststart"}
+        extract_video = extract.output(sermon_video, **output_opts)
         extract_video.execute()
         self.status_update.emit("Video segment extracted successfully.")
 
@@ -211,15 +231,16 @@ class ExtractAndTranscribeThread(QThread):
 
 
 class SettingsDialog(QDialog):
-    """Settings dialog for selecting whisper model and configuring the whisper-cli binary path."""
+    """Settings dialog for selecting whisper model, whisper-cli path, and video encoder."""
 
-    def __init__(self, parent, available_models, current_model, current_whisper_cli):
+    def __init__(self, parent, available_models, current_model, current_whisper_cli, current_video_encoder=DEFAULT_VIDEO_ENCODER):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setMinimumWidth(500)
 
         self.selected_model = current_model
         self.whisper_cli = current_whisper_cli or ""
+        self.video_encoder = current_video_encoder or DEFAULT_VIDEO_ENCODER
 
         layout = QVBoxLayout(self)
 
@@ -248,6 +269,19 @@ class SettingsDialog(QDialog):
             self.model_combo.setEnabled(False)
         layout.addWidget(self.model_combo)
 
+        # Video encoder selection
+        layout.addWidget(QLabel("Video encoder for sermon.mp4:"))
+        self.encoder_combo = QComboBox()
+        self.encoder_labels = [label for label, key in VIDEO_ENCODER_OPTIONS]
+        self.encoder_keys = [key for label, key in VIDEO_ENCODER_OPTIONS]
+        self.encoder_combo.addItems(self.encoder_labels)
+        try:
+            idx = self.encoder_keys.index(self.video_encoder)
+            self.encoder_combo.setCurrentIndex(idx)
+        except ValueError:
+            self.encoder_combo.setCurrentIndex(0)
+        layout.addWidget(self.encoder_combo)
+
         layout.addStretch()
 
         # Dialog buttons
@@ -272,6 +306,7 @@ class SettingsDialog(QDialog):
             self.selected_model = self.model_combo.currentText()
         if self.cli_edit.text():
             self.whisper_cli = self.cli_edit.text()
+        self.video_encoder = self.encoder_keys[self.encoder_combo.currentIndex()]
         super().accept()
 
     def get_selected_model(self):
@@ -279,6 +314,9 @@ class SettingsDialog(QDialog):
 
     def get_whisper_cli(self):
         return self.whisper_cli
+
+    def get_video_encoder(self):
+        return self.video_encoder
 
 
 class SermonTranscriber(QMainWindow):
@@ -401,7 +439,7 @@ class SermonTranscriber(QMainWindow):
 
         self.settings_button = QPushButton("⚙️")
         self.settings_button.setFixedSize(28, 28)
-        self.settings_button.setToolTip("Settings (whisper model + whisper-cli path)")
+        self.settings_button.setToolTip("Settings (whisper model + whisper-cli + video encoder)")
         self.settings_button.clicked.connect(self.open_settings)
         process_layout.addWidget(self.settings_button, 0)
         layout.addLayout(process_layout)
@@ -421,11 +459,15 @@ class SermonTranscriber(QMainWindow):
         if not self.selected_model or self.selected_model not in self.available_models:
             self.selected_model = self.available_models[0] if self.available_models else "ggml-large-v3.bin"
 
+        self.video_encoder = config.get("video_encoder", DEFAULT_VIDEO_ENCODER)
+        if self.video_encoder not in (k for _, k in VIDEO_ENCODER_OPTIONS):
+            self.video_encoder = DEFAULT_VIDEO_ENCODER
+
         # For whisper_cli: if no loadable config (or no key), seek a reasonable default on first run
         if not config or "whisper_cli" not in config:
             self.whisper_cli = get_default_whisper_cli()
             # Save immediately so the discovered default is persisted
-            config = {"selected_model": self.selected_model, "whisper_cli": self.whisper_cli}
+            config = {"selected_model": self.selected_model, "whisper_cli": self.whisper_cli, "video_encoder": self.video_encoder}
             save_config(config)
         else:
             self.whisper_cli = config.get("whisper_cli") or get_default_whisper_cli()
@@ -817,7 +859,8 @@ class SermonTranscriber(QMainWindow):
             self.extraction_thread = ExtractAndTranscribeThread(
                 input_file, self.in_point, self.out_point, base_name,
                 whisper_cli=self.whisper_cli,
-                model_path=os.path.join(DEFAULT_MODELS_DIR, self.selected_model) if self.selected_model else None
+                model_path=os.path.join(DEFAULT_MODELS_DIR, self.selected_model) if self.selected_model else None,
+                video_encoder=self.video_encoder
             )
             self.extraction_thread.status_update.connect(self.update_status)
             self.extraction_thread.finished.connect(self.process_finished)
@@ -846,20 +889,29 @@ class SermonTranscriber(QMainWindow):
         self.extraction_thread = None
 
     def open_settings(self):
-        """Open the settings dialog and persist chosen model + whisper_cli if accepted."""
-        dialog = SettingsDialog(self, self.available_models, self.selected_model, self.whisper_cli)
+        """Open the settings dialog and persist chosen model + whisper_cli + video_encoder if accepted."""
+        dialog = SettingsDialog(
+            self,
+            self.available_models,
+            self.selected_model,
+            self.whisper_cli,
+            self.video_encoder,
+        )
         if dialog.exec():
             new_model = dialog.get_selected_model()
             new_cli = dialog.get_whisper_cli()
+            new_encoder = dialog.get_video_encoder()
             self.selected_model = new_model
             if new_cli:
                 self.whisper_cli = new_cli
+            self.video_encoder = new_encoder or DEFAULT_VIDEO_ENCODER
             # Persist
             config = load_config()
             config["selected_model"] = self.selected_model
             config["whisper_cli"] = self.whisper_cli
+            config["video_encoder"] = self.video_encoder
             save_config(config)
-            self.statusBar().showMessage(f"Model set to: {self.selected_model}")
+            self.statusBar().showMessage(f"Model set to: {self.selected_model} | Encoder: {self.video_encoder}")
 
     def _set_video_controls_enabled(self, enabled):
         """Enable or disable the in/out point buttons, play/pause button, and playhead scrubber (timeline).
