@@ -303,6 +303,7 @@ class SermonTranscriber(QMainWindow):
         # Create central widget and layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
+        self.setAcceptDrops(True)
         layout = QVBoxLayout(central_widget)
 
         # Create video widget
@@ -870,6 +871,36 @@ class SermonTranscriber(QMainWindow):
         self.play_button.setEnabled(enabled)
         self.jump_out_button.setEnabled(enabled)
         self.out_button.setEnabled(enabled)
+
+    def dragEnterEvent(self, event):
+        """Accept drag if it contains a single local video file we support."""
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            if len(urls) == 1 and urls[0].isLocalFile():
+                path = urls[0].toLocalFile()
+                if self._is_supported_video(path):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dropEvent(self, event):
+        """Handle dropped video file by loading it (replaces current if any)."""
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            if len(urls) == 1 and urls[0].isLocalFile():
+                path = urls[0].toLocalFile()
+                if self._is_supported_video(path):
+                    self.load_video(path)
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def _is_supported_video(self, path):
+        """Match the exact extensions offered by the Browse dialog."""
+        if not path:
+            return False
+        ext = os.path.splitext(path)[1].lower()
+        return ext in (".mp4", ".mov", ".mkv")
 
 
 if __name__ == "__main__":
