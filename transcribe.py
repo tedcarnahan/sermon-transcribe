@@ -137,6 +137,28 @@ class ExtractAndTranscribeThread(QThread):
         except Exception as e:
             self.finished.emit(f"Error during processing: {str(e)}")
 
+    def _input_is_h264(self, path):
+        """Return True if the primary video stream codec is h264 (safe to -c:v copy)."""
+        if not path:
+            return False
+        try:
+            cmd = [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "csv=p=0",
+                path,
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=15
+            )
+            codec = (result.stdout or "").strip().lower()
+            return codec in ("h264", "avc1")
+        except Exception:
+            # ffprobe unavailable or unreadable file -> fall back to re-encode
+            return False
+
     def video_extract(self, sermon_video):
         self.status_update.emit("Preparing to extract video segment...")
         in_time = self.format_time_with_ms(self.in_point / 1000)
@@ -148,18 +170,22 @@ class ExtractAndTranscribeThread(QThread):
             .input(self.input_file, ss=in_time, to=out_time)
         )
 
-        if self.video_encoder == "av1":
+        if self.video_encoder == "h264" and self._input_is_h264(self.input_file):
+            self.status_update.emit("Input is already H.264 — using fast copy (no re-encode)...")
+            output_opts = {"vcodec": "copy", "acodec": "copy", "movflags": "+faststart"}
+        elif self.video_encoder == "av1":
             # Replicate Handbrake AV1 (SVT) settings from user logs:
             # preset 6, tune=psnr, profile main (default), crf 34.50 (RF), level auto
             v_opts = {"vcodec": "libsvtav1", "preset": 6, "crf": 34.5, "svtav1-params": "tune=1"}
+            output_opts = {**v_opts, "acodec": "copy", "movflags": "+faststart"}
         elif self.video_encoder == "h265":
             v_opts = {"vcodec": "libx265", "preset": "fast", "crf": 30}
+            output_opts = {**v_opts, "acodec": "copy", "movflags": "+faststart"}
         else:
-            # h264 default
+            # h264 default (re-encode)
             v_opts = {"vcodec": "libx264", "preset": "fast", "crf": 28}
+            output_opts = {**v_opts, "acodec": "copy", "movflags": "+faststart"}
 
-        # movflags and encoder options belong on the *output*, not as globals
-        output_opts = {**v_opts, "acodec": "copy", "movflags": "+faststart"}
         extract_video = extract.output(sermon_video, **output_opts)
         extract_video.execute()
         self.status_update.emit("Video segment extracted successfully.")
