@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialogButtonBox,
     QLineEdit,
+    QCheckBox,
 )
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
 import subprocess
@@ -104,7 +105,7 @@ class ExtractAndTranscribeThread(QThread):
     status_update = Signal(str)
     finished = Signal(str)
 
-    def __init__(self, input_file, in_point, out_point, base_name, whisper_cli=None, model_path=None, video_encoder=DEFAULT_VIDEO_ENCODER):
+    def __init__(self, input_file, in_point, out_point, base_name, whisper_cli=None, model_path=None, video_encoder=DEFAULT_VIDEO_ENCODER, do_transcribe=True, do_transcode=True):
         super().__init__()
         self.input_file = input_file
         self.in_point = in_point
@@ -114,6 +115,8 @@ class ExtractAndTranscribeThread(QThread):
         self.whisper_cli = whisper_cli or get_default_whisper_cli()
         self.model_path = model_path or os.path.join(DEFAULT_MODELS_DIR, "ggml-large-v3.bin")
         self.video_encoder = video_encoder or DEFAULT_VIDEO_ENCODER
+        self.do_transcribe = bool(do_transcribe)
+        self.do_transcode = bool(do_transcode)
 
 
     def run(self):
@@ -123,17 +126,26 @@ class ExtractAndTranscribeThread(QThread):
             sermon_audio = os.path.join(input_dir, f"{self.base_name} sermon.wav")
             sermon_text = os.path.join(input_dir, f"{self.base_name} sermon.txt")
 
-            self.video_extract(sermon_video)
-            if self.is_cancelled:
-                return
+            in_time = self.format_time_with_ms(self.in_point / 1000)
+            out_time = self.format_time_with_ms(self.out_point / 1000)
 
-            self.audio_extract(sermon_video, sermon_audio)
-            if self.is_cancelled:
-                return
+            if self.do_transcode:
+                self.video_extract(sermon_video)
+                if self.is_cancelled:
+                    return
+                audio_source = sermon_video
+            else:
+                audio_source = self.input_file
 
-            self.transcribe(sermon_audio, sermon_text)
+            if self.do_transcribe:
+                self.audio_extract(audio_source, sermon_audio,
+                                   ss=(in_time if not self.do_transcode else None),
+                                   to=(out_time if not self.do_transcode else None))
+                if self.is_cancelled:
+                    return
+                self.transcribe(sermon_audio, sermon_text)
 
-            self.finished.emit("Transcription process complete.")
+            self.finished.emit("Process complete.")
         except Exception as e:
             self.finished.emit(f"Error during processing: {str(e)}")
 
@@ -160,9 +172,15 @@ class ExtractAndTranscribeThread(QThread):
             return False
 
     def video_extract(self, sermon_video):
-        self.status_update.emit("Preparing to extract video segment...")
         in_time = self.format_time_with_ms(self.in_point / 1000)
         out_time = self.format_time_with_ms(self.out_point / 1000)
+
+        # Decide early (and only once) whether this will be a pure copy or actual re-encode.
+        is_copy = (self.video_encoder == "h264" and self._input_is_h264(self.input_file))
+        if is_copy:
+            self.status_update.emit("Preparing to extract video segment...")
+        else:
+            self.status_update.emit("Preparing to extract and transcode video segment...")
 
         extract = (
             FFmpeg()
@@ -170,7 +188,7 @@ class ExtractAndTranscribeThread(QThread):
             .input(self.input_file, ss=in_time, to=out_time)
         )
 
-        if self.video_encoder == "h264" and self._input_is_h264(self.input_file):
+        if is_copy:
             self.status_update.emit("Input is already H.264 — using fast copy (no re-encode)...")
             output_opts = {"vcodec": "copy", "acodec": "copy", "movflags": "+faststart"}
         elif self.video_encoder == "av1":
@@ -190,13 +208,17 @@ class ExtractAndTranscribeThread(QThread):
         extract_video.execute()
         self.status_update.emit("Video segment extracted successfully.")
 
-    def audio_extract(self, video_file, audio_file):
+    def audio_extract(self, video_file, audio_file, ss=None, to=None):
         self.status_update.emit("Converting video to audio...")
+
+        input_kwargs = {}
+        if ss is not None and to is not None:
+            input_kwargs = {"ss": ss, "to": to}
 
         extract_audio = (
             FFmpeg()
             .option("y")
-            .input(video_file)
+            .input(video_file, **input_kwargs)
             .output(audio_file, acodec="pcm_s16le", ac=1, ar=16000)
         )
 
@@ -257,16 +279,14 @@ class ExtractAndTranscribeThread(QThread):
 
 
 class SettingsDialog(QDialog):
-    """Settings dialog for selecting whisper model, whisper-cli path, and video encoder."""
+    """Settings dialog for whisper-cli path (model and video encoder are now in main right panel)."""
 
-    def __init__(self, parent, available_models, current_model, current_whisper_cli, current_video_encoder=DEFAULT_VIDEO_ENCODER):
+    def __init__(self, parent, current_whisper_cli=""):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setMinimumWidth(500)
 
-        self.selected_model = current_model
         self.whisper_cli = current_whisper_cli or ""
-        self.video_encoder = current_video_encoder or DEFAULT_VIDEO_ENCODER
 
         layout = QVBoxLayout(self)
 
@@ -280,33 +300,6 @@ class SettingsDialog(QDialog):
         self.browse_cli_button.clicked.connect(self._browse_for_whisper_cli)
         cli_layout.addWidget(self.browse_cli_button)
         layout.addLayout(cli_layout)
-
-        # Model selection
-        layout.addWidget(QLabel("Whisper Model:"))
-        self.model_combo = QComboBox()
-        if available_models:
-            self.model_combo.addItems(available_models)
-            if current_model in available_models:
-                self.model_combo.setCurrentText(current_model)
-            else:
-                self.model_combo.setCurrentIndex(0)
-        else:
-            self.model_combo.addItem("No models found (ggml-*.bin)")
-            self.model_combo.setEnabled(False)
-        layout.addWidget(self.model_combo)
-
-        # Video encoder selection
-        layout.addWidget(QLabel("Video encoder for sermon.mp4:"))
-        self.encoder_combo = QComboBox()
-        self.encoder_labels = [label for label, key in VIDEO_ENCODER_OPTIONS]
-        self.encoder_keys = [key for label, key in VIDEO_ENCODER_OPTIONS]
-        self.encoder_combo.addItems(self.encoder_labels)
-        try:
-            idx = self.encoder_keys.index(self.video_encoder)
-            self.encoder_combo.setCurrentIndex(idx)
-        except ValueError:
-            self.encoder_combo.setCurrentIndex(0)
-        layout.addWidget(self.encoder_combo)
 
         layout.addStretch()
 
@@ -328,21 +321,12 @@ class SettingsDialog(QDialog):
             self.whisper_cli = path
 
     def accept(self):
-        if self.model_combo.isEnabled():
-            self.selected_model = self.model_combo.currentText()
         if self.cli_edit.text():
             self.whisper_cli = self.cli_edit.text()
-        self.video_encoder = self.encoder_keys[self.encoder_combo.currentIndex()]
         super().accept()
-
-    def get_selected_model(self):
-        return self.selected_model
 
     def get_whisper_cli(self):
         return self.whisper_cli
-
-    def get_video_encoder(self):
-        return self.video_encoder
 
 
 class SermonTranscriber(QMainWindow):
@@ -364,23 +348,57 @@ class SermonTranscriber(QMainWindow):
         em.event_attach(vlc.EventType.MediaPlayerPaused, self._on_paused)
         em.event_attach(vlc.EventType.MediaPlayerStopped, self._on_stopped)
 
-        # Create central widget and layout
+        # Load models + config early (needed for dropdowns in right panel)
+        self.available_models = get_installed_models()
+        config = load_config()
+        self.selected_model = config.get("selected_model")
+        if not self.selected_model or (self.available_models and self.selected_model not in self.available_models):
+            self.selected_model = self.available_models[0] if self.available_models else "ggml-large-v3.bin"
+
+        self.video_encoder = config.get("video_encoder", DEFAULT_VIDEO_ENCODER)
+        if self.video_encoder not in (k for _, k in VIDEO_ENCODER_OPTIONS):
+            self.video_encoder = DEFAULT_VIDEO_ENCODER
+
+        self.do_transcribe = config.get("do_transcribe", True)
+        self.do_transcode = config.get("do_transcode", True)
+
+        # For whisper_cli: if no loadable config (or no key), seek a reasonable default on first run
+        if not config or "whisper_cli" not in config:
+            self.whisper_cli = get_default_whisper_cli()
+            # Save immediately so the discovered default is persisted (include new flags)
+            init_config = {
+                "selected_model": self.selected_model,
+                "whisper_cli": self.whisper_cli,
+                "video_encoder": self.video_encoder,
+                "do_transcribe": self.do_transcribe,
+                "do_transcode": self.do_transcode,
+            }
+            save_config(init_config)
+        else:
+            self.whisper_cli = config.get("whisper_cli") or get_default_whisper_cli()
+
+        # Create central widget and main horizontal layout (video+controls | right action panel)
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         self.setAcceptDrops(True)
-        layout = QVBoxLayout(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+
+        # --- LEFT: video, browse, timeline, in/out/playhead ---
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 10, 0)
 
         # Create video widget
         self.video_widget = QWidget()
         self.video_widget.setMinimumSize(640, 360)
-        layout.addWidget(self.video_widget)
+        left_layout.addWidget(self.video_widget)
 
         # File selection
         file_layout = QHBoxLayout()
         self.file_button = QPushButton("Browse")
         self.file_button.clicked.connect(self.browse_file)
         file_layout.addWidget(self.file_button)
-        layout.addLayout(file_layout)
+        left_layout.addLayout(file_layout)
 
         # Timeline scrubber (full width above button row)
         self.timeline = QSlider(Qt.Orientation.Horizontal)
@@ -388,12 +406,9 @@ class SermonTranscriber(QMainWindow):
         self.timeline.valueChanged.connect(self.on_timeline_change)
         self.timeline.sliderPressed.connect(self.on_timeline_press)
         self.timeline.sliderReleased.connect(self.on_timeline_release)
-        layout.addWidget(self.timeline)
+        left_layout.addWidget(self.timeline)
 
-        # In/Out points row:
-        # Left: QGroupBox("In:") containing set-in + jump-in buttons + centered timestamp label
-        # Center: QGroupBox("Playhead:") with play/pause button (▶️/⏸️) above the time label
-        # Right: QGroupBox("Out:") containing jump-out + set-out buttons + centered timestamp label
+        # In/Out points row (same groups as before)
         points_layout = QHBoxLayout()
 
         emoji_style = """
@@ -455,20 +470,67 @@ class SermonTranscriber(QMainWindow):
         out_group.setLayout(out_v)
         points_layout.addWidget(out_group)
 
-        layout.addLayout(points_layout)
+        left_layout.addLayout(points_layout)
+        main_layout.addWidget(left_widget, 4)
 
-        # Process buttons row: main action + small gear/settings button
-        process_layout = QHBoxLayout()
+        # --- RIGHT: new panel with enable checkboxes + moved dropdowns + action button ---
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(10, 0, 0, 0)
+
+        # Transcription enable + model dropdown (moved from settings)
+        self.transcribe_cb = QCheckBox("Enable transcription")
+        self.transcribe_cb.setChecked(self.do_transcribe)
+        right_layout.addWidget(self.transcribe_cb)
+
+        right_layout.addWidget(QLabel("Model:"))
+        self.model_combo = QComboBox()
+        if self.available_models:
+            self.model_combo.addItems(self.available_models)
+            if self.selected_model in self.available_models:
+                self.model_combo.setCurrentText(self.selected_model)
+            else:
+                self.model_combo.setCurrentIndex(0)
+        else:
+            self.model_combo.addItem("No models found (ggml-*.bin)")
+            self.model_combo.setEnabled(False)
+        right_layout.addWidget(self.model_combo)
+
+        right_layout.addSpacing(12)
+
+        # Transcoding enable + format dropdown (moved from settings)
+        self.transcode_cb = QCheckBox("Enable transcoding")
+        self.transcode_cb.setChecked(self.do_transcode)
+        right_layout.addWidget(self.transcode_cb)
+
+        right_layout.addWidget(QLabel("Transcode format:"))
+        self.encoder_combo = QComboBox()
+        self.encoder_labels = [label for label, key in VIDEO_ENCODER_OPTIONS]
+        self.encoder_keys = [key for label, key in VIDEO_ENCODER_OPTIONS]
+        self.encoder_combo.addItems(self.encoder_labels)
+        try:
+            idx = self.encoder_keys.index(self.video_encoder)
+            self.encoder_combo.setCurrentIndex(idx)
+        except ValueError:
+            self.encoder_combo.setCurrentIndex(0)
+        right_layout.addWidget(self.encoder_combo)
+
+        right_layout.addSpacing(16)
+
+        # Main action button (moved here)
         self.transcribe_button = QPushButton("Extract and Transcribe")
         self.transcribe_button.clicked.connect(self.start_extract_and_transcribe)
-        process_layout.addWidget(self.transcribe_button, 1)  # stretch main button
+        right_layout.addWidget(self.transcribe_button)
 
-        self.settings_button = QPushButton("⚙️")
-        self.settings_button.setFixedSize(28, 28)
-        self.settings_button.setToolTip("Settings (whisper model + whisper-cli + video encoder)")
+        # Small settings gear (kept accessible)
+        self.settings_button = QPushButton("⚙️ Settings")
+        self.settings_button.setFixedHeight(26)
+        self.settings_button.setToolTip("Settings (whisper-cli path)")
         self.settings_button.clicked.connect(self.open_settings)
-        process_layout.addWidget(self.settings_button, 0)
-        layout.addLayout(process_layout)
+        right_layout.addWidget(self.settings_button)
+
+        right_layout.addStretch()
+        main_layout.addWidget(right_widget, 1)
 
         # Initialize variables
         self.playing = False
@@ -478,25 +540,11 @@ class SermonTranscriber(QMainWindow):
         self.extraction_thread = None
         self.has_valid_video = False
 
-        # Load whisper models and config for settings
-        self.available_models = get_installed_models()
-        config = load_config()
-        self.selected_model = config.get("selected_model")
-        if not self.selected_model or self.selected_model not in self.available_models:
-            self.selected_model = self.available_models[0] if self.available_models else "ggml-large-v3.bin"
-
-        self.video_encoder = config.get("video_encoder", DEFAULT_VIDEO_ENCODER)
-        if self.video_encoder not in (k for _, k in VIDEO_ENCODER_OPTIONS):
-            self.video_encoder = DEFAULT_VIDEO_ENCODER
-
-        # For whisper_cli: if no loadable config (or no key), seek a reasonable default on first run
-        if not config or "whisper_cli" not in config:
-            self.whisper_cli = get_default_whisper_cli()
-            # Save immediately so the discovered default is persisted
-            config = {"selected_model": self.selected_model, "whisper_cli": self.whisper_cli, "video_encoder": self.video_encoder}
-            save_config(config)
-        else:
-            self.whisper_cli = config.get("whisper_cli") or get_default_whisper_cli()
+        # Wire config persistence for the new main-panel controls
+        self.transcribe_cb.toggled.connect(self._save_config)
+        self.transcode_cb.toggled.connect(self._save_config)
+        self.model_combo.currentIndexChanged.connect(self._save_config)
+        self.encoder_combo.currentIndexChanged.connect(self._save_config)
 
         # Timer for updates
         self.timer = QTimer(self)
@@ -872,7 +920,11 @@ class SermonTranscriber(QMainWindow):
     def start_extract_and_transcribe(self):
         if self.extraction_thread is None or not self.extraction_thread.isRunning():
             # Get the input file path from the current media
-            input_file = self.player.get_media().get_mrl()
+            media = self.player.get_media()
+            if not media:
+                self.statusBar().showMessage("No video loaded")
+                return
+            input_file = media.get_mrl()
             if input_file.startswith("file://"):
                 input_file = input_file[7:]  # Remove 'file://' prefix
 
@@ -882,11 +934,20 @@ class SermonTranscriber(QMainWindow):
             # Get the base name of the input file
             base_name = os.path.splitext(os.path.basename(input_file))[0]
 
+            # Read live state from right panel controls
+            do_transcribe = self.transcribe_cb.isChecked()
+            do_transcode = self.transcode_cb.isChecked()
+            model_name = self.model_combo.currentText() if (self.model_combo.count() > 0 and self.model_combo.isEnabled()) else self.selected_model
+            model_path = os.path.join(DEFAULT_MODELS_DIR, model_name) if model_name else None
+            video_encoder = self._get_current_video_encoder()
+
             self.extraction_thread = ExtractAndTranscribeThread(
                 input_file, self.in_point, self.out_point, base_name,
                 whisper_cli=self.whisper_cli,
-                model_path=os.path.join(DEFAULT_MODELS_DIR, self.selected_model) if self.selected_model else None,
-                video_encoder=self.video_encoder
+                model_path=model_path,
+                video_encoder=video_encoder,
+                do_transcribe=do_transcribe,
+                do_transcode=do_transcode,
             )
             self.extraction_thread.status_update.connect(self.update_status)
             self.extraction_thread.finished.connect(self.process_finished)
@@ -915,29 +976,17 @@ class SermonTranscriber(QMainWindow):
         self.extraction_thread = None
 
     def open_settings(self):
-        """Open the settings dialog and persist chosen model + whisper_cli + video_encoder if accepted."""
-        dialog = SettingsDialog(
-            self,
-            self.available_models,
-            self.selected_model,
-            self.whisper_cli,
-            self.video_encoder,
-        )
+        """Open the settings dialog (only for whisper-cli path; model + transcoder format live in main right panel)."""
+        dialog = SettingsDialog(self, self.whisper_cli)
         if dialog.exec():
-            new_model = dialog.get_selected_model()
             new_cli = dialog.get_whisper_cli()
-            new_encoder = dialog.get_video_encoder()
-            self.selected_model = new_model
             if new_cli:
                 self.whisper_cli = new_cli
-            self.video_encoder = new_encoder or DEFAULT_VIDEO_ENCODER
-            # Persist
+            # Persist (model/encoder/do_* driven by main panel + _save_config)
             config = load_config()
-            config["selected_model"] = self.selected_model
             config["whisper_cli"] = self.whisper_cli
-            config["video_encoder"] = self.video_encoder
             save_config(config)
-            self.statusBar().showMessage(f"Model set to: {self.selected_model} | Encoder: {self.video_encoder}")
+            self.statusBar().showMessage("Settings updated")
 
     def _set_video_controls_enabled(self, enabled):
         """Enable or disable the in/out point buttons, play/pause button, and playhead scrubber (timeline).
@@ -949,6 +998,32 @@ class SermonTranscriber(QMainWindow):
         self.play_button.setEnabled(enabled)
         self.jump_out_button.setEnabled(enabled)
         self.out_button.setEnabled(enabled)
+        if hasattr(self, "transcribe_button") and getattr(self, "transcribe_button", None) and self.transcribe_button.text() == "Extract and Transcribe":
+            self.transcribe_button.setEnabled(enabled)
+
+    def _save_config(self):
+        """Persist model, encoder, and the two enable checkboxes from the right panel controls."""
+        try:
+            config = load_config()
+            if self.model_combo.count() > 0 and self.model_combo.isEnabled():
+                config["selected_model"] = self.model_combo.currentText()
+            config["video_encoder"] = self._get_current_video_encoder()
+            config["do_transcribe"] = self.transcribe_cb.isChecked()
+            config["do_transcode"] = self.transcode_cb.isChecked()
+            if self.whisper_cli:
+                config["whisper_cli"] = self.whisper_cli
+            save_config(config)
+        except Exception:
+            pass  # never let save break UI
+
+    def _get_current_video_encoder(self):
+        if hasattr(self, "encoder_combo") and self.encoder_combo.count() > 0:
+            try:
+                idx = self.encoder_combo.currentIndex()
+                return self.encoder_keys[idx]
+            except Exception:
+                pass
+        return getattr(self, "video_encoder", DEFAULT_VIDEO_ENCODER)
 
     def dragEnterEvent(self, event):
         """Accept drag if it contains a single local video file we support."""
